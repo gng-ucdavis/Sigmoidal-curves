@@ -72,20 +72,22 @@ for(i in 1:length(unique(dat$m))){
 ##Might need to create a nested forloop
 
 #Intercepts = -2, -1, 1, 2 #We already know what 0 looks like
-b=c(-2,-1, 1,2)
+b=c(-4,-1, 1,4)
 m=seq(-5, 5, by =0.02)
-y=NULL
+x=seq(from=-10, to=10, by =0.1)
+par(mfrow=c(2,2))
+
 for(j in 1:length(b)){
+		y=NULL
+		m.exp=NULL
 	for(i in 1:length(m)){
 	y1=m[i]*x+b[j]
 	y=c(y, y1)
 	
 	#Create data frame to expand b
-m.exp=NULL
-for(l in 1:length(m)){
-	m.exp.1=rep(m[l], length(x))
+	m.exp.1=rep(m[i], length(x))
 	m.exp=c(m.exp, m.exp.1)
-}
+	}
 
 ##Now let's create the data frame
 dat=data.frame(y=y, x=rep(x, length(m)), m=m.exp)
@@ -93,10 +95,8 @@ head(dat)
 dat$prop=plogis(dat$y)
 	
 	plot(prop~x, data=dat, type='n')
+	title(main=c('Intercept =', print(b[j])))
 for(k in 1:length(unique(dat$m))){
 	lines(prop~x, data=dat[dat$m==unique(dat$m)[k],], col=k, lwd=3)
 }
 }
-}
-
-par(mfrow=c(2,2))
