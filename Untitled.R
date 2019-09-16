@@ -1,4 +1,5 @@
 ##This script explores how changing the slope and intercept of a logistic regression affects its shape
+#####lalalalal
 
 ###First, let's create an equation for a straight line; this is in 'logit space' and the equation is y=mx+b
 b=2
