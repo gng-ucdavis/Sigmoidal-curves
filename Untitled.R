@@ -66,3 +66,5 @@ plot(prop~x, data=dat, type='n')
 for(i in 1:length(unique(dat$m))){
 	lines(prop~x, data=dat[dat$m==unique(dat$m)[i],], col=i, lwd=3)
 }
+
+###For visualization purposes, I'm going to create an nxn plot where the intercept stays constant in each plot and the slope varies. But I'll be doing this for multiple intercepts
