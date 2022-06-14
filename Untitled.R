@@ -100,3 +100,5 @@ for(k in 1:length(unique(dat$m))){
 	lines(prop~x, data=dat[dat$m==unique(dat$m)[k],], col=k, lwd=3)
 }
 }
+
+### Test line by DMC220614
