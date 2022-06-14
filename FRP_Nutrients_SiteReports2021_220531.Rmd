@@ -1,0 +1,1424 @@
+---
+title: "FRP_Nutrients_SiteReports2021"
+output: html_document
+author: DMC
+editor_options: 
+chunk_output_type: console
+---
+This file contains the entire process for merging Bryte data with FRP database output.
+
+Comments beginning with '###DMCyymmdd:' denote comments from Danny Cox made on that particular date
+
+
+
+
+This chunk adds in the full Bryte dataset
+```{r}
+rm(list = ls())
+rawT <- read.csv(file = "WQDataReport_All2021.csv", header = TRUE)
+
+dfraw <- data.frame(rawT)
+df <-dfraw[-(955:956),]
+df <- df[-which(df$Analyte %in% c("Glyphosate","Field Specific Conductance")),] ###DMC220531: we don't care about Glyphosate study from DWR or the Field Specific Conductance
+
+# this next bit teases apart the collection date
+df$Date2 <- lapply(strsplit(as.character(df$CollectionDate), "\\ "), "[", 1) # takes out all values before ' ' in the selected cell
+df$Date2 <- as.POSIXct(strptime(df$Date2, format = "%m/%d/%Y"))
+df$Time2 <- lapply(strsplit(as.character(df$CollectionDate), "\\ "), "[", 2) # takes out all values after ' ' in the selected cell
+df$dts <- as.POSIXct(strptime(df$CollectionDate, format = "%m/%d/%Y %H:%M"))
+
+df_Nuts <- df
+
+save(df_Nuts, file = "FRP_Nutrients2021_dfNuts.RData")
+```
+OLD - This chunk gets the sample sizes for 2021
+```{r}
+library(plyr)
+rm(list = ls())
+df <- data.frame(read.csv("WQDataReport_All2021.csv"))
+dfAll <- df[-c(955,956),]
+
+samptype <- sort(unique(dfAll$SampleType))
+dfSamp <- dfAll[which(dfAll$SampleType == "Normal Sample"),]
+
+summSamp <- ddply(dfSamp, c("Analyte"), summarise, # find counts of individual analytes for each site
+                 SampN <- length(Result))
+
+library(reshape2)
+nut <- dfAll[,c(6,7,8,10,11,12,15,16,17,18)]
+nut$dts <- as.POSIXct(strptime(nut$CollectionDate, format = "%m/%d/%Y %H:%M"))
+nut$Result <- as.numeric(nut$Result)
+nutA <- ddply(nut, c("SampleCode","dts","Description","Analyte"), summarise,
+              Result2 = mean(Result))
+nut <- nutA[which(is.na(nutA$Result2)==F),]
+
+
+
+nut2 <- dcast(nut, SampleCode + dts + Description ~ Analyte, value.var = "Result2")
+
+nut2$partN <- nut2$`Total Kjeldahl Nitrogen` - nut2$`Dissolved Organic Nitrogen`
+nut2$partC <- nut2$`Total Organic Carbon` - nut2$`Dissolved Organic Carbon`
+```
+OLD - This chunk imports the Sample Inventory for 2021 that originated from the folder "C:\Users\DCox\OneDrive - California Department of Fish and Wildlife\Documents\FRP\Monitoring\Data\SampleInventory_2021"
+```{r}
+rm(list = ls())
+si2021 <- read.csv(file = "SI_2021_old220531.csv") # import csv from sample inventory
+s21 <- data.frame(si2021)
+s21 <- s21[,c(1,2,3,5,12,13)] # subset columns of interest
+
+colnames(s21) <- c("Site","Station","Gear","SampID","Status","Comments") # rename columns
+
+sInv <- s21[which(s21$Gear %in% c("chlorophyll/nutrients","nutrients")),] # select only nutrient rows
+
+save(sInv, file = "FRP_Nutrients2021_SampleInv.RData")
+```
+
+OLD - This chunk does the actual relating between Sample Inventory and Brytes's results. This chunk is obsolete - it provides basis for correcting 2021 Sample Inventory.
+See next chunk for incorporation of revised 2021 Sample Inventory.
+```{r}
+rm(list = ls())
+load("FRP_Nutrients2021_dfNuts.RData")
+load("FRP_Nutrients2021_SampleInv.RData")
+
+dfAll <- df_Nuts
+#####################################
+# Here is where I merge the datasets
+#####################################
+# but first I need to deal with more issues 
+#dfAll$Sample.Type[which(dfAll$Sample.Code =="EM0617B0146")] <- c("Blank; Equipment")# EM0617B0146 is misentered by Bryte as a "Normal Sample" but it is in fact a Blank.
+#dfAll$Sample.Type[which(dfAll$Sample.Code =="EM0617B0140")] <- c("Blank; Equipment")# EM0617B0146 is misentered by Bryte as a "Normal Sample" but it is in fact a Blank.
+
+dfAll$invSite <- c(rep("",length(dfAll$DataStatus))) # new column to be populated with Site name from inventory
+dfAll$invStn <- c(rep("",length(dfAll$DataStatus))) # new column to be populated with Station name from inventory
+dfAll$invYorN <- c(rep("N",length(dfAll$DataStatus))) # new column populated with 'N' meaning that no association was made between Bryte ID and inventory
+dfAll$SinvComments <- c(rep("N",length(dfAll$DataStatus))) # new column populated with 'N' meaning that no association was made between Bryte ID and inventory
+for(i in 1:length(dfAll$DataStatus)){
+  for(j in 1:length(sInv$Station)){
+    if(tolower(dfAll$SampleCode[i]) == tolower(sInv$SampID[j])){
+      dfAll$invSite[i] = sInv$Site[j] # populates site column IF there is an association 
+      dfAll$invStn [i] = sInv$Station[j] # populates station IF there is an association
+      dfAll$invYorN[i] = "Y" # changes 'N' to 'Y' IF there is an association
+      dfAll$SinvComments[i] = sInv$Comments[j]
+    }
+  }
+}
+
+#EF0321B0013 description says it is from Lower Yolo Ranch but the Sample Inventory says Yolo Flyway Farms. It is also the duplicate of EF0321B0012 DMC220531: It is indeed from YFF, based on the field data sheet the Parent ID for this should be EF031B0015, the field datasheet does not have EF031B0012
+#EF0321B0012 is not in Sample Inventory. DMC220531: Based on date and collection time given to Bryte, this samples belongs to LYR, site visit 4902, need to add to Sample Inventory
+#EF0321B0016 says it is from Toe Drain but there is no record of this BryteID in the Sample Inventory... actually, there is a record at bottom of MAR2021 tab dated for 4/2/2021 and the Bryte SampleID is EF0421B0016 but this ID does not exist in our Bryte data, it was likely printed on COC for 3/31/2021 sampling and then not sampled until 4/2/2021. DMC220531: found datasheet it is indeed this Bryte ID but the CollectionDate is incorrect, should be 4/2/2022 14:30
+#EF0321B0005 is in Sample Inventory but it is not labeled as Lab Blank
+#EF0321B0007 is in Sample Inventory but it is not labeled as Duplicate to EF0321B0006
+#EF0421B0030 description says it is from Shag Slough but Dan's comment in Sample Inventory says it is Liberty
+#EF0421B0059 should be a Lab Blank, it was one of the tests for determining sources of contamination. Can omit since already have 1 Lab BLank for that week
+#EF0621B0073, EF0621B0074, EF0621B0075, EF0621B0071 are samples from training day for DMC. Must omit
+#EF0821B0077 SampleType should be "Blank; Field"
+#EF0821B0112 is not in Sample Inventory, is a field blank
+#EF0821B0111 is not in Sample Inventory, is a lab blank
+#EF1121B0715 is not in Sample Inventory, is a field blank
+#EF1121B0716 is not in Sample Inventory, is a normal sample
+#EF1121B0714 is not in Sample Inventory, is a lab blank
+
+#save(dfAll, file = "FRP_Nutrients_BryteSVandINVmerge.RData")
+
+```
+
+CURRENT - This chunk imports the Sample Inventory for 2021 that originated from the folder "C:\Users\DCox\OneDrive - California Department of Fish and Wildlife\Documents\FRP\Monitoring\Data\SampleInventory_2021"
+```{r}
+rm(list = ls())
+si2021 <- read.csv(file = "SI_2021_current220601.csv") # import csv from sample inventory
+s21 <- data.frame(si2021)
+s21 <- s21[,c(1,2,3,5,12,13)] # subset columns of interest
+
+colnames(s21) <- c("Site","Station","Gear","SampID","Status","Comments") # rename columns
+
+sInv <- s21[which(s21$Gear %in% c("chlorophyll/nutrients","nutrients")),] # select only nutrient rows
+
+save(sInv, file = "FRP_Nutrients2021_SampleInv220601.RData")
+```
+
+CURRENT - This is the up-to-date chunk for incorporating 2021 Sample Inventory.
+```{r}
+rm(list = ls())
+load("FRP_Nutrients2021_dfNuts.RData")
+load("FRP_Nutrients2021_SampleInv220601.RData")
+
+dfAll <- df_Nuts
+#####################################
+# Here is where I merge the datasets
+#####################################
+# but first I need to deal with more issues 
+#dfAll$Sample.Type[which(dfAll$Sample.Code =="EM0617B0146")] <- c("Blank; Equipment")# EM0617B0146 is misentered by Bryte as a "Normal Sample" but it is in fact a Blank.
+#dfAll$Sample.Type[which(dfAll$Sample.Code =="EM0617B0140")] <- c("Blank; Equipment")# EM0617B0146 is misentered by Bryte as a "Normal Sample" but it is in fact a Blank.
+
+dfAll$invSite <- c(rep("",length(dfAll$DataStatus))) # new column to be populated with Site name from inventory
+dfAll$invStn <- c(rep("",length(dfAll$DataStatus))) # new column to be populated with Station name from inventory
+dfAll$invYorN <- c(rep("N",length(dfAll$DataStatus))) # new column populated with 'N' meaning that no association was made between Bryte ID and inventory
+dfAll$SinvComments <- c(rep("N",length(dfAll$DataStatus))) # new column populated with 'N' meaning that no association was made between Bryte ID and inventory
+for(i in 1:length(dfAll$DataStatus)){
+  for(j in 1:length(sInv$Station)){
+    if(tolower(dfAll$SampleCode[i]) == tolower(sInv$SampID[j])){
+      dfAll$invSite[i] = sInv$Site[j] # populates site column IF there is an association 
+      dfAll$invStn [i] = sInv$Station[j] # populates station IF there is an association
+      dfAll$invYorN[i] = "Y" # changes 'N' to 'Y' IF there is an association
+      dfAll$SinvComments[i] = sInv$Comments[j]
+    }
+  }
+}
+
+BryteSite <- unique(dfAll$Description)
+InvSite <- unique(dfAll$invSite)
+
+dfAll$ParentSample[which(dfAll$SampleCode=="EF0321B0013")] <- "EF0321B0015"#EF0321B0013 description says it is from Lower Yolo Ranch but the Sample Inventory says Yolo Flyway Farms. It is also the duplicate of EF0321B0012 DMC220531: It is indeed from YFF, based on the field data sheet the Parent ID for this should be EF031B0015, the field datasheet does not have EF031B0012
+dfAll$CollectionDate[which(dfAll$SampleCode=="EF0321B0016")] <- "04/02/2021 14:30"
+dfAll$CollectionDate[which(dfAll$SampleCode=="EF0421B0047")] <- "04/26/2021 16:50"
+dfAll$CollectionDate[which(dfAll$SampleCode=="EF0421B0048")] <- "04/26/2021 17:43"
+dfAll$SampleType[which(dfAll$SampleCode=="EF0421B0059")] <- "Blank; Equipment"#EF0421B0059 should be a Lab Blank, it was one of the tests for determining sources of contamination. Can omit since already have 1 Lab BLank for that week
+dfAll$SampleType[which(dfAll$SampleCode=="EF0821B0077")] <- "Blank; Field" #EF0821B0077 SampleType should be "Blank; Field"
+dfAll$SampleType[which(dfAll$SampleCode=="EF0821B0082")] <- "Blank; Field" #EF0821B0082 SampleType should be "Blank; Field"
+
+###DMC220601: this line will set the Location as the Sample Inventory location, which has been checked against original datasheets
+dfAll$newLoc <- dfAll$invSite
+
+###DMC220601: this line will remove the training samples and the test QC sample
+dfAll <- dfAll[-which(dfAll$SampleCode %in% c("EF0421B0059", "EF0621B0073", "EF0621B0074", "EF0621B0075", "EF0621B0071")),] #EF0621B0073, EF0621B0074, EF0621B0075, EF0621B0071 are samples from training day for DMC. Must omit. #EF0421B0059 should be a Lab Blank, it was one of the tests for determining sources of contamination. Can omit since already have 1 Lab BLank for that week
+
+dfAll$Date2 <- lapply(strsplit(as.character(dfAll$CollectionDate), "\\ "), "[", 1) # takes out all values before ' ' in the selected cell
+dfAll$Date2 <- as.POSIXct(strptime(dfAll$Date2, format = "%m/%d/%Y"))
+dfAll$Time2 <- lapply(strsplit(as.character(dfAll$CollectionDate), "\\ "), "[", 2) # takes out all values after ' ' in the selected cell
+dfAll$dts <- as.POSIXct(strptime(dfAll$CollectionDate, format = "%m/%d/%Y %H:%M"))
+
+colnames(dfAll)
+
+dfBryteInv <- dfAll[,c("SampleCode","newLoc","dts","Date2","Time2","Analyte","Result","RptLimit","Units","Method","Matrix","SampleType","ParentSample","Notes","SinvComments")]
+
+
+save(dfBryteInv, file = "FRP_Nutrients2021_BryteINVmerge.RData")
+```
+
+This chunk imports the Site Visit data from the FRP database
+```{r}
+rm(list = ls())
+rawT <- read.csv(file = "SiteVisit.csv", header = TRUE, quote = "")
+
+dfraw <- data.frame(rawT)
+df <-dfraw
+df <- df[,c(2,6,1,5,11,12:22)]
+df$date2 <- as.POSIXct(strptime(df$Visit.Date, format = "%m/%d/%Y"))
+
+dfSite <- df[,c(1,17,4:16)]
+save(dfSite, file = "FRP_Nutrients_dfSite.RData")
+```
+
+This chunk imports the Sample data from the FRP database
+```{r}
+rm(list = ls())
+rawT <- read.csv(file = "Sample.csv", header = TRUE, quote = "") # import Sample data
+
+df <- data.frame(rawT) # create dataframe
+df <- df[,c(3,2,4,5,6,20,21,40)] # subset columns of interest
+dfSamp <- df[which(df$GearTypeAbbreviation =="NUT"),] # select rows with 'NUT' in the column 'GearTypeAbbreviation'
+uID <- sort(unique(dfSamp$SampleID_frp))
+dfSamp$SampleID_frp <- gsub("EM0617B141","EM0617B0141", dfSamp$SampleID_frp, fixed = TRUE)
+dfSamp$SampleID_frp <- gsub("EM0617B142","EM0617B0142", dfSamp$SampleID_frp, fixed = TRUE)
+dfSamp$SampleID_frp <- gsub("EM0617B143","EM0617B0143", dfSamp$SampleID_frp, fixed = TRUE)
+
+save(dfSamp, file = "FRP_Nutrients_dfSamp.RData")
+
+```
+
+This chunk pulls together Sample and Site Visit information and adds it to the Bryte dataset
+```{r}
+rm(list = ls())
+load("FRP_Nutrients_dfSamp.RData")
+load("FRP_Nutrients_dfSite.RData")
+load("FRP_Nutrients_dfNuts.RData")
+
+dfAll <- df_Nuts
+dfAll$VisitNo <- c(rep("",length(dfAll$Data.Status)))
+for(i in 1:length(dfAll$Data.Status)){ # this for loop adds the Visit Number from the Sample data
+  for(j in 1:length(dfSamp$VisitNo)){
+    if(dfAll$Sample.Code[i] == dfSamp$SampleID_frp[j]){
+      dfAll$VisitNo[i] = dfSamp$VisitNo[j] 
+    }
+  }
+}
+
+#this part adds new columns to populate with data from Site Visit
+dfAll$svLoc <- c(rep("",length(dfAll$Data.Status)))
+dfAll$Tide <- c(rep("",length(dfAll$Data.Status)))
+dfAll$Secchi <- c(rep("",length(dfAll$Data.Status)))
+dfAll$SurfTemp <- c(rep("",length(dfAll$Data.Status)))
+dfAll$DO <- c(rep("",length(dfAll$Data.Status)))
+dfAll$SC <- c(rep("",length(dfAll$Data.Status)))
+dfAll$pH <- c(rep("",length(dfAll$Data.Status)))
+dfAll$Turbidity <- c(rep("",length(dfAll$Data.Status)))
+dfAll$Phycocyanin <- c(rep("",length(dfAll$Data.Status)))
+dfAll$ChlA <- c(rep("",length(dfAll$Data.Status)))
+dfAll$fDOM <- c(rep("",length(dfAll$Data.Status)))
+dfAll$Microcystis <- c(rep("",length(dfAll$Data.Status)))
+dfAll$svComments <- c(rep("",length(dfAll$Data.Status)))
+dfAll$svYorN <- c(rep("N",length(dfAll$Data.Status)))
+
+for(i in 1:length(dfAll$Data.Status)){ # this for loop populates new columns with Site Visit data
+  for(j in 1:length(dfSite$date2)){
+    if(dfAll$VisitNo[i] == dfSite$VisitNo[j]){
+      dfAll$svLoc[i] = dfSite$Location[j] 
+      dfAll$Tide[i] = dfSite$Tide[j]
+      dfAll$Secchi[i] = dfSite$Secchi[j]
+      dfAll$SurfTemp[i] = dfSite$SurfTemp[j]
+      dfAll$DO[i] = dfSite$DO[j]
+      dfAll$SC[i] = dfSite$SC[j]
+      dfAll$pH[i] = dfSite$pH[j]
+      dfAll$Turbidity[i] = dfSite$Turbidity[j]
+      dfAll$Phycocyanin[i] = dfSite$Phycocyanin[j]
+      dfAll$ChlA[i] = dfSite$Chlorophyll[j]
+      dfAll$fDOM[i] = dfSite$FDOM[j]
+      dfAll$Microcystis[i] = dfSite$Microcystis[j]
+      dfAll$svComments[i] = dfSite$SiteComments[j]
+      dfAll$svYorN[i] = "Y"
+    }
+  }
+}
+
+save(dfAll, file = "FRP_Nutrients_BryteSVmerge.RData")
+```
+
+This next chunk flags Blanks in Bryte data that have concentrations >RL (reporting limit). It then flags analytes whose samples share the same batch of runs as the flagged blanks. It also flags samples that have a relative percent difference >25% with it's duplicate.
+DO NOT RUN unless you have new data... takes a while
+```{r QAQC using Blanks and Duplicates}
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_BryteINVmerge.RData")
+
+dfX <- dfBryteInv
+#dfX <- dfX[,c(6,7,8,10,11,12,16,17,19,20,3,4,18,21,32,47,48,35:46)] # extract columns of interest and re-order them
+dfX <- dfX[-which(dfX$Notes %in% c("Matrix Spike","Duplicate")),] ###DMC210824: needed to remove rows with "Matrix Spike" in the Notes column since these are samples added with known concentration of an analyte as part of normal lab routine. ###DMC220601: added the "Duplicate" in the Notes column since this is Bryte-internal duplicate
+
+dfX$labX <- dfX$Result # new column with the result
+Blanks <- c("Blank; Equipment","Blank; Field") # names of the samples that are blanks
+dfX$year <- format(dfX$Date2, "%Y") # gives year
+dfX$week <- format(dfX$Date2, "%W") # gives week of year
+dfX$yrwk <- paste(dfX$year,dfX$week,sep = "-") # make a year-week variable
+
+###DMC210708: i inserted this next bit to look at whether there is only 1 blank per week. If there are 2 in one week, then need to make sure samples have correct flagging. I also need to flag samples for the week since DSE pointed out that we only run blanks once a week.
+dfB <- dfX[which(dfX$SampleType %in% Blanks),]
+#summB <-  ddply(dfB, c("yrwk"), summarise,
+#               N    = length(unique(Date2)) #used Date2 since some days have Field and Lab blanks on same day and did not want to count them individually
+#) # only 4 weeks have >1 blank control, here is their breakdown:
+# week 2019-39 has 2 because 1 is for Glyphosate
+# Week 2020-40 has 2 because Field and Lab blanks done on different days
+# week 2018-23 has 2 unique Lab blanks so will need to adjust... BUT, they both have the same Analyte flagged (DIN)
+# week 2018-19 has 2 unique Lab blanks so will need to adjust... BUT, they both have the same Analyte flagged (DIN)
+###DMC210708: given that there are no instances where we need to flag different sample events within the same week, we will continue with the same procedure but this time we will flag analytes for that WEEK instead of that DAY
+summB <-  ddply(dfB, c("yrwk"), summarise,
+               N    = length(unique(SampleType)) ###DMC220601: used SampleType instead of Date2 so that I can tell if each week has a total of 2 blanks
+)
+###DMC220601: some weeks only have Lab Blank and NO field blank: 2021-12 and 2021-18
+
+dfX$Flag1Blank <- c(rep("",length(dfX$SampleCode))) # Find out if Blanks report under the limit (Y or N)
+for(i in 1:length(dfX$SampleCode)){
+  if(dfX$SampleType[i] %in% Blanks & is.na(as.numeric(dfX$Result[i]))==TRUE){
+    dfX$Flag1Blank[i] = "N"
+  }
+  else if(dfX$SampleType[i] %in% Blanks & is.na(as.numeric(dfX$Result[i]))==FALSE){
+    dfX$Flag1Blank[i] = "Y"
+  }
+}
+
+'%ni%' <- Negate('%in%') # function to give opposite of %in%
+#dfFlagBlank <- dfX[which(dfX$Flag1Blank == "Y"),] # Extract flagged blanks
+dfFlagBlank <- dfX[which(dfX$SampleType %in% Blanks),] # Extract blanks
+dfX$Flag1Sample <- c(rep("", length(dfX$SampleCode))) # flag analyte results that were produced on same day as flagged Blank
+for(i in 1:length(dfX$SampleCode)){
+  for(j in 1:length(dfFlagBlank$SampleCode)){
+    #if(dfX$Sample.Type[i] %ni% Blanks & dfX$Analyte[i] == dfFlagBlank$Analyte[j] & dfX$Date2[i] == dfFlagBlank$Date2[j] & dfFlagBlank$Flag1Blank[j] == "Y"){
+    if(dfX$SampleType[i] %ni% Blanks & dfX$Analyte[i] == dfFlagBlank$Analyte[j] & dfX$yrwk[i] == dfFlagBlank$yrwk[j] & dfFlagBlank$Flag1Blank[j] == "Y"){ ###DMC210708: changed this to flag all analytes for the week that the blank was flagged
+      dfX$Flag1Sample[i] = "Y"
+    }
+  }
+}
+
+### Now we need to see what the Relative Percent Difference is between Duplicate samples... DMC: need to see what Replicate indicates for the few samples tagged in 2017. For this exercise, will include them
+Duplicate <- c("Duplicate Sample","Replicate Sample")
+
+dfDup <- dfX[which(dfX$SampleType %in% Duplicate),]
+dfDup$ParentResult <- ""
+for(i in 1:length(dfDup$SampleCode)){
+  for(j in 1:length(dfX$SampleCode)){
+    if(dfDup$ParentSample[i] == dfX$SampleCode[j] & dfDup$Analyte[i] == dfX$Analyte[j]){
+      dfDup$ParentResult[i] = dfX$Result[j]
+    }
+  }
+}
+
+dfDup$RPD <- c(rep("", length(dfDup$SampleCode))) # make a column for the Relative Percent Difference flag
+for(i in 1:length(dfDup$SampleCode)){
+  if(is.na(as.numeric(dfDup$labX[i]))==FALSE & is.na(as.numeric(dfDup$ParentResult[i]))==FALSE){
+    dfDup$RPD[i] = ((as.numeric(dfDup$labX[i]) - as.numeric(dfDup$ParentResult[i]))/((as.numeric(dfDup$labX[i]) + as.numeric(dfDup$ParentResult[i]))/2))*100 # provides the numeric RPD
+  }
+  else if(is.na(as.numeric(dfDup$labX[i]))==TRUE & is.na(as.numeric(dfDup$ParentResult[i]))==TRUE){
+    dfDup$RPD[i] = c("-99999") # flags the rows where both Parent and Duplicate are <R.L. so cannot be compared, i.e. they ARE good
+  }
+  else{
+    dfDup$RPD[i] = c("-66666") # flags the rows where the Parent OR the Duplicate are <R.L. so cannot be compared, i.e. they MIGHT be bad
+  }
+}
+dup666 <- c("-66666") # duplicates that must be further inspected before flagging
+dup999 <- c("-99999") # duplicates that are OK and do not need further inspection
+dfDup$RPD2 <- as.numeric(dfDup$RPD) # makes the entire column numeric for further processing
+
+dfDup$Flag1Dup <- c(rep("", length(dfDup$SampleCode)))
+for(i in 1:length(dfDup$SampleCode)){
+  if(dfDup$RPD[i] == dup666){
+    dfDup$Flag1Dup[i] = "S" # flags value as suspicious since the Parent OR the duplicate is <R.L. and cannot be compared
+  }
+  else if((dfDup$RPD2[i] > -5000 & dfDup$RPD2[i] < -25) | dfDup$RPD2[i] > 25){
+    dfDup$Flag1Dup[i] = "Y" # flags values for removal since it the RPD is > +/- 25%
+  }
+  else{
+    dfDup$Flag1Dup[i] = "N" # flags values for Passing
+  }
+}
+###DMC: only 3 Chl and 1 TKN were flagged for >25% RPD
+
+dfX$Flag2Sample <- c(rep("", length(dfX$SampleCode))) # flag analyte results that were produced on same day as flagged Blank
+for(i in 1:length(dfX$SampleCode)){
+  for(j in 1:length(dfDup$SampleCode)){
+    if(dfX$SampleCode[i] == dfDup$ParentSample[j] & dfX$Analyte[i] == dfDup$Analyte[j] & dfDup$Flag1Dup[j] == "Y"){
+      dfX$Flag2Sample[i] = "Y"
+    }
+    else if(dfX$SampleCode[i] == dfDup$SampleCode[j] & dfX$Analyte[i] == dfDup$Analyte[j] & dfDup$Flag1Dup[j] == "Y"){
+      dfX$Flag2Sample[i] = "Y"
+    }
+  }
+}
+# check to see any differences between flagged rows with Parent.Sample vs flagged rows of Sample.Code
+ddd <- dfDup$ParentSample[which(dfDup$Flag1Dup=="Y")]
+sss <- dfX$SampleCode[which(dfX$Flag2Sample=="Y")]
+sort(ddd)
+sort(sss)
+
+save(dfX, Blanks, Duplicate, file = "FRP_Nutrients2021_BryteQAQC.RData")
+```
+
+
+This chunk creates a template used to graph 2021 annual reports for Restoration projects that only require 2021 data
+```{r}
+rm(list = ls())
+load("FRP_Nutrients2021_BryteQAQC.RData")
+library(plyr)
+'%ni%' <- Negate('%in%') # this allows you to create a new function that performs the opposite operation of %in% when used to subset
+dfF_All <- dfX[which(dfX$Flag1Sample == "Y"| dfX$Flag2Sample == "Y"),] # | dfX$Flag2Sample == "Y"
+dfF_Blank <- dfX[which(dfX$Flag1Sample == "Y"),] # | dfX$Flag2Sample == "Y"
+dfF_Dup <- dfX[which(dfX$Flag2Sample == "Y"),] # | dfX$Flag2Sample == "Y"
+flaggedAll <- ddply(dfF_All, c("Analyte","year"), summarise,
+              n = length(Result))
+flaggedBlank <- ddply(dfF_Blank, c("Analyte","year"), summarise,
+              n = length(Result))
+flaggedDup <- ddply(dfF_Dup, c("Analyte","year"), summarise,
+              n = length(Result))
+dfX <- dfX[-which(dfX$Flag1Sample == "Y" | dfX$SampleType %in% Blanks | dfX$SampleType %in% Duplicate),]# | dfX$Flag2Sample == "Y"),] ###DMC220601: the removal of flagged duplicates did not seem warranted, however, these are duplicates from the same bucket...
+
+# make new columns for year, year-month, and month
+dfX$year <- format(dfX$Date2, "%Y") 
+dfX$yrmo <- format(dfX$Date2, "%Y-%b")
+dfX$mo <- format(dfX$Date2, "%m")
+
+# make new columns for Location and Site
+dfX$Location <- dfX$newLoc
+dfX$Site2 <- dfX$newLoc
+sort(unique(dfX$Location)) # see what Locations are present in the dataframe
+
+for(i in 1:length(dfX$SampleCode)){
+  if(dfX$newLoc[i] == "Broad Slough"){
+    dfX$Location[i] = "Broad"
+  }
+  if(dfX$newLoc[i] == "Shag Slough"){
+    dfX$Location[i] = "Shag"
+  }
+  if(dfX$newLoc[i] == "Stacys"){
+    dfX$Location[i] = "WTIB"
+  }
+  if(dfX$newLoc[i] == "Wings Landing"){
+    dfX$Location[i] = "Wings"
+  }
+  if(dfX$newLoc[i] == "Yolo Flyway Farms"){
+    dfX$Location[i] = "Flyway"
+  }
+}
+
+sort(unique(dfX$Location))
+dfX$Site2 <- dfX$Location ###DMC220601: Site2 is a relic from older script and it is used downstream
+
+# make individual vectors of restoration, reference and channel sites. The order of vectors should match for correct pairing
+proj <- c("Arnold","Bradmoor","Chipps","Decker","Flyway","Lookout","Lower Yolo Ranch","Tule Red","Wings","Winter")
+refSite <- c("Blacklock","Blacklock","Browns","WTIB","Liberty","Liberty","Liberty","Ryer","Rush Ranch","Browns")
+chSite <- c("L Honker","L Honker","Broad","Horseshoe","Toe Drain","Shag","Stairsteps","Grizzly","Peytonia-Suisun","Broad")
+# put all vectors in a dataframe. Be sure to check for correct pairings
+dfproj <- data.frame(proj,refSite,chSite)
+# add columns that will house the Type of wetland that is looked up in the dfproj (i.e. is it the Restoration site, Reference site, or Adjacent Channel site?)
+dfX$type <- c(rep("",length(dfX$SampleCode)))
+for(i in 1:length(dfX$SampleCode)){
+  for(j in 1:length(dfproj$proj)){
+    if(dfX$Site2[i] == dfproj$proj[j]){
+      dfX$type[i] = c("Restoration")
+    }
+    if(dfX$Site2[i] == dfproj$refSite[j]){
+      dfX$type[i] = c("Reference")
+    }
+    if(dfX$Site2[i] == dfproj$chSite[j]){
+      dfX$type[i] = c("Channel")
+    }
+  }
+}
+
+
+dfX$type <- factor(dfX$type, levels = c("Restoration","Reference","Channel")) # apply order to levels for plotting
+
+
+
+save(dfX, dfproj, file = "FRP_Nutrients2021_ForGraphs.RData")
+```
+
+DMC220601: This must wait until 2021 data entry QC is complete and data assurance has been performed.
+This chunk makes the dataframe for graphing site visit data for all sites that only require 2021 data
+```{r}
+library(reshape2)
+library(viridis)
+# select colors from viridis palette
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+# add QAQC'd site visit data from 2020
+rawT <- read.csv(file = "SiteVisit2020qaqc.csv", header = TRUE, row.names = NULL)
+dfraw <- data.frame(rawT) # make raw dataframe that is unchanged and can be used for comparison
+df <-dfraw # create working dataframe
+df <- df[,c(3,7,2,6,12,13:25)] # select columns of interest and re-order them
+df$date2 <- as.POSIXct(strptime(df$Visit.Date, format = "%Y-%m-%d")) # make date object vector
+df$pH[which(df$Visit.Date < as.POSIXct(strptime("2020-10-01", format = "%Y-%m-%d")))] <- NA ###DMC210720: added this line because pH sensor module was replaced and calibrated on 200821 (21Aug2020); all values measured prior to that date are not usable
+df$pH[which(df$pH < 7)] <- NA # we do not calibrate with pH 4 solution so anything less than 7 is not usable
+df$FDOM[which(df$VisitNo == 3381)] <- NA # this FDOM value was above the range for acceptable sensor values
+df$do[which(df$VisitNo == 4093)] <- NA # this DO was flagged during QAQC
+df$Chlorophyll[which(df$VisitNo == 4086)] <- NA # This Chlorophyll value was flagged during QAQC
+df$Phycocyanin[which(df$VisitNo == 4202)] <- NA # This Phycocyanin value was flagged during QAQC
+
+inToeD <- c(3651,3648,3647,3649) # the comments for these Site visits say they are in the Toe Drain
+df$Location[which(df$VisitNo %in% inToeD)] <- "Toe Drain"
+
+
+dfWQ <- df[,c(1,6:15)] # make working dataframe for Site Visit water quality parameters
+longWQ <- melt(dfWQ, id.var = c('VisitNo')) # create a long format of the water quality data so that it may be plotted with facets in ggplot
+longWQ$Site <- c(rep("",length(longWQ$VisitNo))) # Column for site
+longWQ$Flag <- c(rep("",length(longWQ$VisitNo))) # column for flag info
+longWQ$Date <- c(rep("",length(longWQ$VisitNo))) # column for date
+for(i in 1:length(longWQ$value)){ # populate the new columns from the wide format dataframe
+  for(j in 1:length(df$QAQC)){
+    if(longWQ$VisitNo[i] == df$VisitNo[j]){
+      longWQ$Site[i] = df$Location[j]
+      longWQ$Flag[i] = df$Flagged_Data[j]
+      longWQ$Date[i] = as.character(df$date2[j])
+    }
+  }
+}
+longWQ$date2 <- as.POSIXct(strptime(longWQ$Date, format = "%Y-%m-%d")) # make date object
+
+# order water quality parameters for graphs and assign labels
+longWQ$var2 <- factor(longWQ$variable, levels = c("SurfTemp","do","SC","pH","Turbidity","Chlorophyll","Phycocyanin","FDOM"), labels = c("Temperature (\u00b0C)","Dissolved Oxygen\n(mg/L)","Specific Conductance\n(\u00b5S/cm)","pH","Turbidity (FNU)","Chlorophyll a (RFU)","Phycocyanin (RFU)","Fluorescent Dissolved\nOrganic Matter (RFU)"))
+
+save(list = ls(), file = "FRP_Environmentals2021_ForGraphs.RData")
+```
+
+
+This chunk makes graphs of Nutrients, Chlorophyll grabs, Site Visit WQ, and Site Visit chlorophyll for Decker
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 4 #the number placed here gives you the associated project. In this case '4' is 'Decker'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+
+# this does all nutrients for Decker
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11])  & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Decker","WTIB","Horseshoe\nBend"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*30),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*30, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+summNut <- ddply(dfNut, c("type","AnaNut"), summarise,
+                 SampN <- length(RL))
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Decker","WTIB","Horseshoe\nBend"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*30),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*30, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+
+#### for Decker site visit graphs
+#rm(list = ls())
+proj <- c("Decker","Horseshoe","WTIB")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >20
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Decker","WTIB","Horseshoe\nBend"))
+xWQ <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xWQ),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) + # as.Date() needed for jitter to work
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*30),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+summSV <- ddply(dfX3[which(dfX3$variable %in% xWQ),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*30),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_labels = "%b")+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+```
+
+
+This chunk makes graphs of Nutrients, Chlorophyll grabs, Site Visit WQ, and Site Visit chlorophyll for Winter; Winter has very limited data and no adjacent habitat data
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 10 #the number placed here gives you the associated project. In this case '10' is 'Winter'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+# this does all nutrients for Winter
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Winter","Browns","Broad\nSlough"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Winter","Browns","Broad\nSlough"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+
+#### for Winter site visit graphs
+proj <- c("Winter","Broad Slough","Browns")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >20
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Winter","Browns","Broad\nSlough"))
+xWQ <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xWQ & dfX3$date2 > as.POSIXct(strptime("2020-07-01", format = "%Y-%m-%d"))),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(labels = date_format("%b")) +
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+summSV <- ddply(dfX3[which(dfX3$variable %in% xWQ),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio & dfX3$date2 > as.POSIXct(strptime("2020-07-01", format = "%Y-%m-%d"))),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_labels = "%b")+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+```
+
+
+This chunk is for using 2021 Decker template to graph Flyway
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 5 #the number placed here gives you the associated project. In this case '5' is 'Flyway'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+# this does all nutrients for Yolo
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Flyway","Liberty","Toe Drain"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*15),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*15, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21),order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Flyway","Liberty","Toe Drain"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*15),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*1, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b")+#, limits = c(as.Date(as.POSIXct(strptime("2020-06-01 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-07-01 20:00", format = "%Y-%m-%d %H:%M"))))+
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+#### for Yolo site visit graphs
+#rm(list = ls())
+proj <- c("Flyway","Toe Drain","Liberty")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >30
+
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Flyway","Liberty","Toe Drain"))
+xxx <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xxx),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*15),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_labels = "%b")+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+summSV <- ddply(dfX3[which(dfX3$variable %in% xxx),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*15),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_labels = "%b")+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+```
+
+
+This chunk is for using 2020 Decker template to graph Tule Red
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 8 #the number placed here gives you the associated project. In this case '8' is 'Tule Red'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+# this does all nutrients for Tule Red
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Tule Red","Ryer","Grizzy Bay"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21),order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Tule Red","Ryer","Grizzy Bay"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+#### for Yolo site visit graphs
+#rm(list = ls())
+proj <- c("Tule Red","Grizzly Bay","Ryer")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >30
+
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Tule Red","Ryer","Grizzly Bay"))
+xWQ <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xWQ),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+summSV <- ddply(dfX3[which(dfX3$variable %in% xWQ),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M"))))+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+
+```
+
+This chunk is for using 2021 Decker template to graph Wings Landing
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 9 #the number placed here gives you the associated project. In this case '9' is 'Wings'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+# this does all nutrients for Tule Red
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Wings Landing","Rush Ranch","Peytonia-\nSuisun"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21),order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Wings Landing","Rush Ranch","Peytonia-\nSuisun"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+#### for Yolo site visit graphs
+#rm(list = ls())
+proj <- c("Tule Red","Grizzly Bay","Ryer")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >30
+
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Tule Red","Ryer","Grizzly Bay"))
+xWQ <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xWQ),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+summSV <- ddply(dfX3[which(dfX3$variable %in% xWQ),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M"))))+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+
+```
+
+This chunk is for using 2021 Decker template to graph Lower Yolo Ranch
+```{r Plot variables by Project}
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(lemon)
+library(viridis)
+library(scales)
+library(plyr)
+
+rm(list = ls())
+load("FRP_Nutrients2021_ForGraphs.RData")
+
+dfX2 <- dfX
+xName <- 7 #the number placed here gives you the associated project. In this case '7' is 'Lower Yolo Ranch'
+xAna <- sort(unique(dfX2$Analyte))
+#xNut <- xAna[-c(1,2,8:20)]
+xNut <- xAna[c(1,7,2,3,6,4,9,5,8,10,11)]
+xNut <- factor(xNut, levels = xNut)
+dfX2$AnaNut <- factor(dfX2$Analyte, levels = levels(xNut))
+mycol <- (viridis_pal(option = "H")(9))[c(2,5,8)]
+mysh <- c(21,25)
+dfX2$RL <- as.numeric(dfX2$RptLimit)
+dfX2$ltRL <- c(rep("",length(dfX2$SampleCode)))
+dfX2$ltRLt <- c(rep("ARL",length(dfX2$SampleCode)))
+for(i in 1:length(dfX2$SampleCode)){
+  if(is.na(as.numeric(dfX2$Result[i])) == TRUE){
+    dfX2$ltRL[i] = dfX2$RL[i]/2
+    dfX2$ltRLt[i] = c("BRL")
+  }
+}
+
+# this does all nutrients for Tule Red
+dfNut <- dfX2[which(dfX2$Analyte %in% as.character(xNut[3:11]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfNut$type <- factor(dfNut$type, levels = c("Restoration","Reference","Channel"), labels = c("Lower Yolo\nRanch","Liberty\nIsland","Shag\nSlough"))
+pNut <- ggplot(data = dfNut, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, colour = "black") + #, shape = 21
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black") +#, shape = 25
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  scale_fill_manual(values = mycol) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~AnaNut, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (mg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21),order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summNut <- ddply(dfNut, c("type"), summarise,
+                 SampN <- length(unique(SampleCode)))
+
+# this is to recreate plot from figures document with chlorophyll and pheophytin facets
+dfChl <- dfX2[which(dfX2$Analyte %in% as.character(xNut[1:2]) & (dfX2$Site2 == dfproj$proj[xName] | dfX2$Site2 == dfproj$refSite[xName] | dfX2$Site2 == dfproj$chSite[xName])),]
+dfChl$type <- factor(dfChl$type, levels = c("Restoration","Reference","Channel"), labels = c("Lower Yolo\nRanch","Liberty\nIsland","Shag\nSlough"))
+pChl <- ggplot(data = dfChl, aes(x = as.Date(Date2), y = as.numeric(labX), shape = ltRLt, fill = type))+#, fill = type, shape = type)) +
+  #geom_hline(aes(yintercept = RL), linetype = "dashed") +
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  geom_point(aes(y = as.numeric(ltRL)),position = position_jitter(w=0.4*8, h = 0.01),size = 2, alpha = 0.9, colour = "black")+
+  scale_fill_manual(values = mycol) +
+  scale_shape_manual(breaks = c("BRL"),values = mysh, labels = c("< R.L.")) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  expand_limits(y=0) +
+  facet_rep_wrap(~Analyte, scales = "free_y", ncol=2, repeat.tick.labels = TRUE) +
+  ylab("Concentration (\u03BCg/L)") +
+  xlab("Date") +
+  guides(fill = guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold"))
+  #facet_grid(Analyte~.)
+
+summChl <- ddply(dfChl, c("type","Analyte"), summarise,
+                 SampN <- length(RL))
+
+#### for Yolo site visit graphs
+#rm(list = ls())
+proj <- c("Tule Red","Grizzly Bay","Ryer")
+type <- c("Restoration","Channel","Reference")
+dfX3 <- longWQ[which(longWQ$Site %in% proj),]
+dfX3$type <- c(rep("",length(dfX3$VisitNo)))
+for(i in 1:length(dfX3$VisitNo)){
+  for(j in 1:length(proj)){
+    if(dfX3$Site[i] == proj[j]){
+      dfX3$type[i] = type[j]
+    }
+  }
+}
+dfX3$thresh1 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh2 <- c(rep("",length(dfX3$VisitNo)))
+dfX3$thresh1[which(as.character(dfX3$variable)=="SurfTemp")] <- 24 # juvenile chinook CTmax
+dfX3$thresh2[which(as.character(dfX3$variable)=="SurfTemp")] <- 25.4 # dsm CTmax
+dfX3$thresh1[which(as.character(dfX3$variable)=="Turbidity")] <- 12 # dsm minimum turbidity for greatest survival
+#dfX3$thresh2[which(as.character(dfX3$variable)=="Turbidity")] <- 80 # dsm maximum turbidity for greatest survival ###DMC: omitted this line since no measurements were recoreded >30
+
+
+dfX3$type <- factor(dfX3$type, levels = c("Restoration","Reference","Channel"), labels = c("Tule Red","Ryer","Grizzly Bay"))
+xWQ <- c("SurfTemp","do","SC","pH","Turbidity")
+pWQ <- ggplot(data = dfX3[which(dfX3$variable %in% xWQ),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M")))) +
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+summSV <- ddply(dfX3[which(dfX3$variable %in% xWQ),], c("type","variable"), summarise,
+                 SampN <- length(VisitNo))
+
+xBio <- c("Chlorophyll","Phycocyanin","FDOM")
+pBio <- ggplot(data = dfX3[which(dfX3$variable %in% xBio),], aes(x = as.Date(date2), y = as.numeric(value), fill = type)) +
+  geom_hline(aes(yintercept = as.numeric(thresh1)),linetype = "dashed")+
+  geom_hline(aes(yintercept = as.numeric(thresh2)))+
+  geom_point(position = position_jitter(w=0.4*8),size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = mycol) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b", limits = c(as.Date(as.POSIXct(strptime("2020-07-21 20:00", format = "%Y-%m-%d %H:%M"))), as.POSIXct(strptime("2020-10-31 20:00", format = "%Y-%m-%d %H:%M"))))+
+  facet_rep_wrap(~var2, scales = "free_y", ncol=1, repeat.tick.labels = TRUE, switch = 'y') +
+  ylab(dfX3$var2) +
+  xlab("Date") +
+  theme(axis.title = element_text(face = "bold"), 
+        strip.text = element_text(face = "bold"),
+        legend.title = element_blank(),
+        legend.key = element_blank(),
+        legend.text = element_text(face = "bold")) +
+  theme( axis.title.y = element_blank(), # remove the default y-axis title, "wt"
+         strip.background = element_rect(fill = 'transparent'), # replace the strip backgrounds with transparent
+         strip.placement = 'outside', # put the facet strips on the outside
+         strip.text.y = element_text(angle=180))
+
+
+```
